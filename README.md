@@ -30,3 +30,12 @@ inspect any historical findings and revoke real leaked credentials.
 Deployment follows each project's hosting architecture. Use short-lived OIDC
 credentials, limit the trusted repository/ref/environment in the cloud trust
 policy, and keep deployment jobs separate from untrusted pull-request checks.
+
+## Rollout and protection
+
+A repository adopts the scan with a small caller workflow pinned to a reviewed
+commit. Public repositories can use a repository ruleset to require the scan
+and a pull request before their default branch changes. The ruleset uses zero
+required approvals for a single-maintainer project. Private repositories on a
+plan without branch protection still run the check, but merging green remains a
+maintainer procedure. The workflow itself grants only `contents: read`.
