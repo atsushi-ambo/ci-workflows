@@ -183,6 +183,39 @@ adopt_twice
 expect_no_file .github/workflows/automerge.yml
 expect_grep "$tmp/out1" "deploys or publishes on push"
 
+case=name-collision
+new_repo collision <<'EOF'
+=== .github/workflows/ci.yml
+name: security
+on:
+  pull_request:
+jobs: {}
+EOF
+if "$adopt" --ci ci.yml >"$tmp/out1" 2>&1; then fail "accepted two workflows named security"; fi
+expect_grep "$tmp/out1" "are both named 'security'"
+expect_no_file .github/workflows/automerge.yml
+
+case=commented-and-quoted
+new_repo commented <<'EOF'
+=== .github/workflows/ci.yml
+name: CI
+'on':
+  pull_request:
+jobs: {}
+#    uses: atsushi-ambo/ci-workflows/.github/workflows/security.yml@e32497f0fb113b8a5556c218b4fef1ca398283c2
+=== .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: github-actions # keep pins fresh
+    directory: /
+    schedule:
+      interval: weekly
+EOF
+adopt_twice
+expect_grep .github/workflows/security.yml "security.yml@$sha # v1.2.3"
+expect_grep .github/workflows/automerge.yml 'workflows: ["CI", "security"]'
+[ "$(grep -c github-actions .github/dependabot.yml)" -eq 1 ] || fail "duplicated the github-actions entry"
+
 case=other-owner
 new_repo other <<'EOF'
 === README.md

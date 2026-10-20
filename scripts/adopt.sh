@@ -60,7 +60,7 @@ pin="$sha # $tag"
 # The "on:" block of a workflow, without comments.
 on_block() {
   sed -e '/^[[:space:]]*#/d' -e 's/[[:space:]]#.*$//' "$1" |
-    awk '/^("?on"?|true):/ {inside=1; print; next} inside && /^[^[:space:]]/ {inside=0} inside {print}'
+    awk '/^(["\047]?on["\047]?|true):/ {inside=1; print; next} inside && /^[^[:space:]]/ {inside=0} inside {print}'
 }
 has_trigger() { on_block "$1" | grep -Eq "(^|[^A-Za-z_])$2([^A-Za-z_]|$)"; }
 wf_name() {
@@ -68,8 +68,8 @@ wf_name() {
   name=$(sed -n 's/^name:[[:space:]]*//p' "$1" | head -n1 | sed -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']$//")
   echo "${name:-$1}"
 }
-calls_scan() { grep -Eq "uses:[[:space:]]*$SHARED/\.github/workflows/security\.yml@" "$1"; }
-calls_automerge() { grep -Eq "uses:[[:space:]]*$SHARED/\.github/workflows/automerge\.yml@" "$1"; }
+calls_scan() { grep -Eq "^[[:space:]]*(- )?uses:[[:space:]]*$SHARED/\.github/workflows/security\.yml@" "$1"; }
+calls_automerge() { grep -Eq "^[[:space:]]*(- )?uses:[[:space:]]*$SHARED/\.github/workflows/automerge\.yml@" "$1"; }
 
 # Writes $2 to file $1 unless it already has exactly that content.
 put() {
@@ -110,7 +110,7 @@ if [ "${#scan_files[@]}" -gt 0 ]; then
   for f in "${scan_files[@]}"; do repin "$f" security.yml; done
 else
   scan_file=$WF/security.yml
-  if [ -e "$scan_file" ]; then
+  if [ -e "$scan_file" ] || [ -e "$WF/security.yaml" ]; then
     scan_file=$WF/secret-scan.yml
     [ ! -e "$scan_file" ] || die "$WF/security.yml and $scan_file exist but do not call the shared scan"
   fi
@@ -178,13 +178,22 @@ elif [ "${required[0]}" = keep ]; then
   repin "$automerge_file" automerge.yml
   note "kept the CI list of the existing $automerge_file (pass --ci to replace it)"
 else
+  # Auto-merge finds runs by workflow name, so the names must tell the
+  # required workflows apart from each other and from any other workflow.
   names=()
+  name_files=()
   for f in "${required[@]}" "${scan_files[@]}"; do
     n=$(wf_name "$f")
     [[ $n != *'"'* ]] || die "workflow name with a double quote: $n"
-    dup=""
-    for m in ${names[@]+"${names[@]}"}; do [ "$m" = "$n" ] && dup=1; done
-    [ -n "$dup" ] || names+=("$n")
+    seen=""
+    for g in ${name_files[@]+"${name_files[@]}"}; do [ "$g" = "$f" ] && seen=1; done
+    [ -n "$seen" ] && continue
+    for g in ${workflows[@]+"${workflows[@]}"}; do
+      [ "$g" = "$f" ] || [ "$g" = "$automerge_file" ] && continue
+      [ "$(wf_name "$g")" != "$n" ] || die "$f and $g are both named '$n'; rename one"
+    done
+    names+=("$n")
+    name_files+=("$f")
   done
   list=$(printf '"%s", ' "${names[@]}")
   put "$automerge_file" "name: automerge
@@ -234,7 +243,7 @@ if [ ! -f "$dependabot" ]; then
   put "$dependabot" "version: 2
 updates:
   - $(sed '2,$s/^/  /' <<<"$entry")"
-elif grep -Eq "package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*$" "$dependabot"; then
+elif grep -Eq "package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*(#.*)?$" "$dependabot"; then
   note "unchanged $dependabot (github-actions entry present)"
 else
   grep -q '^updates:' "$dependabot" || die "$dependabot has no top-level updates:; add the github-actions entry by hand"
