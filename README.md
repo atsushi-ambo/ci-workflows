@@ -31,6 +31,41 @@ Deployment follows each project's hosting architecture. Use short-lived OIDC
 credentials, limit the trusted repository/ref/environment in the cloud trust
 policy, and keep deployment jobs separate from untrusted pull-request checks.
 
+## Adopting the shared CI in a project
+
+`scripts/adopt.sh` sets up the same shared CI in any project of
+`atsushi-ambo`, new or existing. Run it from the project's repository root,
+review the diff, then commit it in a pull request:
+
+```sh
+/Users/atsushiambo/personal/app/ci-workflows/scripts/adopt.sh [--ci <workflow file>]... [--branch <default branch>]
+```
+
+It writes only these files, pinning this repository to the commit of its
+latest release with a `# vX.Y.Z` comment so Dependabot can bump the pin:
+
+- `.github/workflows/security.yml`: the secret scan caller. An existing caller
+  of the shared scan keeps its file name and only gets the new pin; if
+  `security.yml` is taken by an unrelated workflow, `secret-scan.yml` is used.
+- `.github/workflows/automerge.yml`: the auto-merge caller, which waits for the
+  project's CI and the secret scan. Without `--ci` it picks the one workflow
+  that runs on `pull_request`; it adds no auto-merge (and says why) when there
+  is none, several, one limited by `paths`, a workflow that deploys or
+  publishes on push (a merge by the workflow token would not trigger it), or
+  CI outside GitHub Actions. An existing caller keeps its CI list and only gets
+  the new pin unless `--ci` is given (repeatable).
+- `.github/dependabot.yml`: a weekly `github-actions` entry, added without
+  changing other entries.
+
+It also creates the `automerge` label when the auto-merge caller is present.
+It never commits, pushes or changes repository settings, refuses to run
+outside a git repository root or for a repository of another owner, and a
+second run changes nothing. `tests/adopt_test.sh` checks this with a stub `gh`.
+
+Releases are tagged `vX.Y.Z` here after their checks pass; projects then move
+to a new release through Dependabot pull requests or by running `adopt.sh`
+again.
+
 ## Auto-merge for labelled pull requests
 
 `automerge.yml` merges a pull request once the project's own CI has passed on
