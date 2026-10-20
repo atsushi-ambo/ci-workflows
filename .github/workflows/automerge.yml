@@ -1,0 +1,136 @@
+name: automerge
+
+# Merges a pull request once the caller's CI has passed on its latest commit.
+# GitHub's own auto-merge and branch protection are not available for private
+# repositories on the Free plan, so this does the same job with the API only.
+#
+# Opt-in and narrow: the PR needs the "automerge" label, must come from a
+# branch of the same repository, be opened by the repository owner, not be a
+# draft, target the default branch and already contain the latest default
+# branch (so the tested code is what lands). It never checks out or runs the
+# PR's code, which is what keeps the caller's pull_request_target trigger safe.
+#
+# The caller job must grant contents, pull-requests and actions write; see
+# README.md for the caller workflow.
+on:
+  workflow_call:
+    inputs:
+      default-branch:
+        description: Branch the PR must target and contain.
+        type: string
+        default: main
+      ci-workflows:
+        description: >-
+          Names of the caller's CI workflows (one per line), exactly as listed
+          under the caller's workflow_run trigger. The newest pull_request run
+          of every one of them, for this PR and commit, must have succeeded.
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  merge:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'pull_request' &&
+        github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # One merge into the default branch at a time: a later job re-checks
+    # against the branch the earlier one produced. A queued job replaced by a
+    # newer one just leaves its PR open, which is safe.
+    concurrency:
+      group: automerge-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      # To start CI on the default branch after the merge: a push made with
+      # this token does not trigger workflows, but a workflow_dispatch does.
+      actions: write
+    steps:
+      - name: Merge the PR if CI passed on its latest commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          BASE: ${{ inputs.default-branch }}
+          CI_WORKFLOWS: ${{ inputs.ci-workflows }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          mapfile -t workflows < <(tr ',' '\n' <<<"$CI_WORKFLOWS" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+          if [ "${#workflows[@]}" -eq 0 ]; then
+            echo "::error::The ci-workflows input names no workflow."
+            exit 1
+          fi
+          pr=$(gh pr list --repo "$REPO" --head "$HEAD_BRANCH" --base "$BASE" --state open \
+            --json number,headRefOid,baseRefName,isDraft,author,labels,isCrossRepository \
+            --jq 'map(select(.headRefOid == env.HEAD_SHA)) | first // empty')
+          if [ -z "$pr" ]; then
+            echo "No open PR into $BASE whose latest commit is $HEAD_SHA; nothing to merge."
+            exit 0
+          fi
+          number=$(jq -r .number <<<"$pr")
+          reason=$(jq -r --arg owner "$OWNER" --arg base "$BASE" '
+            if .isCrossRepository then "it comes from a fork"
+            elif .author.login != $owner then "it was not opened by the owner"
+            elif .isDraft then "it is a draft"
+            elif .baseRefName != $base then "it does not target \($base)"
+            elif ([.labels[].name] | index("automerge")) == null then "it has no automerge label"
+            else "" end' <<<"$pr")
+          if [ -n "$reason" ]; then
+            echo "Not merging #$number: $reason."
+            exit 0
+          fi
+          # The newest run of each CI workflow for this PR into the default
+          # branch, at this exact commit, must have succeeded (covers a label
+          # added after the run, a newer run that failed, a workflow that has
+          # not finished yet, and runs of another PR from the same commit).
+          runs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[]' | jq -s .)
+          for name in "${workflows[@]}"; do
+            state=$(PR_NUMBER="$number" NAME="$name" jq -r '
+              [.[] | select(.name == env.NAME and any(.pull_requests[]?;
+                (.number | tostring) == env.PR_NUMBER and .base.ref == env.BASE))]
+              | sort_by(.created_at) | last | "\(.status) \(.conclusion)"' <<<"$runs")
+            if [ "$state" != "completed success" ]; then
+              echo "Not merging #$number: $name on $HEAD_SHA is '$state'."
+              exit 0
+            fi
+          done
+          # CI ran against the default branch of that moment; only merge when
+          # the branch already contains today's, so nothing untested lands.
+          behind=$(gh api "repos/$REPO/compare/$BASE...$HEAD_SHA" --jq .behind_by)
+          if [ "$behind" != "0" ]; then
+            echo "Not merging #$number: the branch is $behind commit(s) behind $BASE. Update it and CI will run again."
+            exit 0
+          fi
+          # Fails instead of merging if a newer commit was pushed to the PR
+          # meanwhile. (Only this workflow's merges are serialized: a manual
+          # push to the default branch in the seconds since the comparison
+          # above is not detected.)
+          gh pr merge "$number" --repo "$REPO" --merge --match-head-commit "$HEAD_SHA"
+          echo "Merged #$number at $HEAD_SHA."
+          # The merge push does not start workflows; run CI on the default
+          # branch where the workflow allows a manual run.
+          for name in "${workflows[@]}"; do
+            path=$(NAME="$name" gh api --paginate "repos/$REPO/actions/workflows?per_page=100" \
+              --jq '.workflows[] | select(.name == env.NAME and .state == "active") | .path' | head -n1)
+            if [ -z "$path" ]; then
+              echo "::warning::No active workflow named '$name'; not started on $BASE."
+              continue
+            fi
+            if gh api "repos/$REPO/contents/$path?ref=$BASE" --jq .content | base64 -d \
+                | grep -v '^[[:space:]]*#' | grep -qw workflow_dispatch; then
+              gh workflow run "$(basename "$path")" --repo "$REPO" --ref "$BASE"
+              echo "Started $name on $BASE."
+            else
+              echo "$name has no workflow_dispatch trigger; not started on $BASE."
+            fi
+          done
