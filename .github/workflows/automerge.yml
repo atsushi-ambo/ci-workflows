@@ -69,11 +69,11 @@ jobs:
             echo "::error::The ci-workflows input names no workflow."
             exit 1
           fi
-          pr=$(gh pr list --repo "$REPO" --head "$HEAD_BRANCH" --state open \
+          pr=$(gh pr list --repo "$REPO" --head "$HEAD_BRANCH" --base "$BASE" --state open \
             --json number,headRefOid,baseRefName,isDraft,author,labels,isCrossRepository \
             --jq 'map(select(.headRefOid == env.HEAD_SHA)) | first // empty')
           if [ -z "$pr" ]; then
-            echo "No open PR whose latest commit is $HEAD_SHA; nothing to merge."
+            echo "No open PR into $BASE whose latest commit is $HEAD_SHA; nothing to merge."
             exit 0
           fi
           number=$(jq -r .number <<<"$pr")
@@ -111,7 +111,10 @@ jobs:
             echo "Not merging #$number: the branch is $behind commit(s) behind $BASE. Update it and CI will run again."
             exit 0
           fi
-          # Fails instead of merging if a newer commit was pushed meanwhile.
+          # Fails instead of merging if a newer commit was pushed to the PR
+          # meanwhile. (Only this workflow's merges are serialized: a manual
+          # push to the default branch in the seconds since the comparison
+          # above is not detected.)
           gh pr merge "$number" --repo "$REPO" --merge --match-head-commit "$HEAD_SHA"
           echo "Merged #$number at $HEAD_SHA."
           # The merge push does not start workflows; run CI on the default

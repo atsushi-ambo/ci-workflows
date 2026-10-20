@@ -43,7 +43,8 @@ from a branch of the same repository, was opened by the repository owner, is
 not a draft, targets the default branch, the newest `pull_request` run of every
 listed CI workflow for that exact PR and commit succeeded, and the branch
 already contains the latest default branch. The merge uses
-`--match-head-commit`, merges are serialized per repository, and afterwards
+`--match-head-commit`, merges are serialized per repository (a manual push to the default branch in
+the seconds between the up-to-date check and the merge is not detected), and afterwards
 each listed CI workflow that has `workflow_dispatch` is started on the default
 branch (a merge made with the workflow token does not trigger `push`
 workflows, so deploy-on-push workflows will not run either).
