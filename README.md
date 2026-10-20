@@ -31,6 +31,59 @@ Deployment follows each project's hosting architecture. Use short-lived OIDC
 credentials, limit the trusted repository/ref/environment in the cloud trust
 policy, and keep deployment jobs separate from untrusted pull-request checks.
 
+## Auto-merge for labelled pull requests
+
+`automerge.yml` merges a pull request once the project's own CI has passed on
+its latest commit. It is for repositories where GitHub's native auto-merge and
+branch protection are not available (private repositories on the Free plan).
+It only calls the GitHub API and never checks out or runs pull-request code.
+
+A PR is merged only when all of these hold: it has the `automerge` label, comes
+from a branch of the same repository, was opened by the repository owner, is
+not a draft, targets the default branch, the newest `pull_request` run of every
+listed CI workflow for that exact PR and commit succeeded, and the branch
+already contains the latest default branch. The merge uses
+`--match-head-commit`, merges are serialized per repository, and afterwards
+each listed CI workflow that has `workflow_dispatch` is started on the default
+branch (a merge made with the workflow token does not trigger `push`
+workflows, so deploy-on-push workflows will not run either).
+
+Caller, with the workflow names copied from the project's CI (`name:`):
+
+```yaml
+name: automerge
+on:
+  workflow_run:
+    workflows: [CI] # the project's CI workflow names
+    types: [completed]
+  # A label added, or a draft marked ready, after CI already passed.
+  pull_request_target:
+    types: [labeled, ready_for_review]
+permissions: {}
+jobs:
+  merge:
+    uses: atsushi-ambo/ci-workflows/.github/workflows/automerge.yml@COMMIT_SHA
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    with:
+      default-branch: main
+      ci-workflows: |
+        CI
+```
+
+The caller job must grant the three write permissions above; the reusable
+workflow cannot raise them. Create the label once per repository:
+
+```sh
+gh label create automerge --color 0e8a16 --description "Merge automatically once CI passes on the latest commit"
+```
+
+Keep the list under `workflow_run.workflows` and `ci-workflows` the same.
+Do not list a workflow that is filtered by `paths` and may not run for a PR;
+such a PR would then never merge automatically.
+
 ## Rollout and protection
 
 A repository adopts the scan with a small caller workflow pinned to a reviewed
